@@ -6,30 +6,43 @@ from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
+# Load the EPUB file
 book = epub.read_epub('shadow_slave.epub')
 
-# Extract only valid XHTML chapters
-chapter_items = [item for item in book.items if item.get_type() == ITEM_DOCUMENT]
-chapter_items.sort(key=lambda x: x.get_id())
+# Extract valid chapter documents (those that start with Chapter NNNN)
+chapter_items = []
+for item in book.items:
+    if item.get_type() == ITEM_DOCUMENT:
+        content = item.get_content().decode(errors='ignore')
+        if 'Chapter ' in content:
+            chapter_items.append(item)
 
-# Adjust this based on where "Chapter 1001" actually starts
-REAL_CHAPTER_START_INDEX = 8  # ✅ Adjust this based on your book
-REAL_CHAPTER_START_NUMBER = 1001
-CHAPTER_OFFSET = REAL_CHAPTER_START_NUMBER - REAL_CHAPTER_START_INDEX
-
+# Cache setup
 CACHE_DIR = 'cache'
 os.makedirs(CACHE_DIR, exist_ok=True)
-
 RANGE_FILE = os.path.join(CACHE_DIR, 'range.json')
 DEFAULT_RANGE = {'from': 1001, 'to': 1002}
 
+# Map visible chapter numbers to actual index
+chapter_map = {}
+for idx, item in enumerate(chapter_items):
+    content = item.get_content().decode(errors='ignore')
+    soup = BeautifulSoup(content, 'html.parser')
+    headings = soup.find_all(['h1', 'h2'])
+    for tag in headings:
+        text = tag.get_text()
+        if text.strip().lower().startswith("chapter"):
+            try:
+                number = int(''.join(filter(str.isdigit, text.split()[1])))
+                chapter_map[number] = idx
+            except:
+                continue
+
+sorted_chapters = sorted(chapter_map.items())
+
+
 def get_chapter_html(chapter_item):
     soup = BeautifulSoup(chapter_item.get_content(), 'html.parser')
-
-    # Optional: Remove existing <h2> or <h1> titles inside EPUB content
-    for tag in soup.find_all(['h1', 'h2']):
-        tag.decompose()
-
     return soup.prettify()
 
 @app.route("/")
@@ -56,28 +69,6 @@ def index():
         {{ content | safe }}
     """, from_chap=last_range['from'], to_chap=last_range['to'], content=cached_content)
 
-
-@app.route("/chapter/<int:chapter_id>")
-def chapter(chapter_id):
-    if chapter_id >= len(chapter_items):
-        return "Chapter not found", 404
-
-    chap_num = chapter_id + CHAPTER_OFFSET
-    chap_html = get_chapter_html(chapter_items[chapter_id])
-
-    prev_link = f"/chapter/{chapter_id - 1}" if chapter_id > REAL_CHAPTER_START_INDEX else None
-    next_link = f"/chapter/{chapter_id + 1}" if chapter_id + 1 < len(chapter_items) else None
-
-    return render_template_string("""
-        <p>
-            {% if prev_link %}<a href="{{ prev_link }}">&laquo; Previous</a>{% endif %}
-            {% if next_link %}<a href="{{ next_link }}" style="float:right">Next &raquo;</a>{% endif %}
-        </p>
-        <h2>Chapter {{ chap_num }}</h2>
-        <div>{{ chap_html|safe }}</div>
-    """, prev_link=prev_link, next_link=next_link, chap_num=chap_num, chap_html=chap_html)
-
-
 @app.route("/load-range")
 def load_range():
     try:
@@ -92,12 +83,11 @@ def load_range():
 
     content = ""
     for chap_num in range(from_chap, to_chap + 1):
-        chap_id = chap_num - CHAPTER_OFFSET
-        if 0 <= chap_id < len(chapter_items):
-            chapter_html = get_chapter_html(chapter_items[chap_id])
-            content += f"<h2>Chapter {chap_num}</h2>\n<div>{chapter_html}</div><hr>"
+        if chap_num in chapter_map:
+            chapter_html = get_chapter_html(chapter_items[chapter_map[chap_num]])
+            content += f"<div>{chapter_html}</div><hr>"
 
-    # Cache the range
+    # Cache the rendered HTML
     with open(os.path.join(CACHE_DIR, 'multi_chap.html'), 'w') as f:
         f.write(content)
 
